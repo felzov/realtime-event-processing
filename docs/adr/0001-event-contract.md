@@ -85,6 +85,24 @@ project is unvalidated, so the contract does not try to be generic.
    The codes live in `src/event_pipeline/domain/errors.py` (phase 1, slice 4); this list is their
    specification.
 
+**Update 2026-11-18 (phase 1, slice 4):** writing the parser showed four places where "strict"
+needed a precise rule. Each is enforced in `src/event_pipeline/domain/events.py` and tested.
+
+- `occurred_at` must match the RFC 3339 date-time grammar: `YYYY-MM-DDThh:mm:ss`, an optional
+  fraction, and `Z` or `±hh:mm`; `T` and `Z` may be lowercase, as RFC 3339 allows. Pydantic on its
+  own also accepts Unix seconds as a string (`"1763467230"`), a missing seconds field and a space
+  instead of `T`; those are rejected with `invalid_format`. The offset `-00:00` means "offset
+  unknown" in RFC 3339, so it is rejected as `naive_datetime`. A timestamp whose UTC equivalent
+  falls outside the years 1–9999 is rejected as `out_of_range` instead of crashing the parser.
+- A JSON object that repeats a key is rejected with `invalid_json`. A JSON parser keeps the last
+  value, so `"amount_minor": -5, "amount_minor": 7` would otherwise pass as 7 and the invalid value
+  would never be checked.
+- `order_id` may not contain control characters (U+0000–U+001F, U+007F). PostgreSQL `text` cannot
+  store U+0000, so such an event would otherwise pass validation and fail later, while being
+  applied.
+- For `unknown_field`, the reported path is the object that contains the unknown key, not the key
+  itself: the key name is client input and is not echoed.
+
 ## Consequences
 
 - A client that retries after a timeout must resend the same `event_id`. A client that generates a
