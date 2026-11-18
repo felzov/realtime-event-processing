@@ -10,3 +10,14 @@ poison events), not feature breadth.
 ## Status
 
 Phase 1 (contracts) in progress. Nothing described above is implemented yet.
+
+## Development
+
+Needs [uv](https://docs.astral.sh/uv/) (it installs Python 3.12 from `.python-version`).
+
+```sh
+make install                   # uv sync
+uv run pre-commit install      # optional: lint, typecheck and secret scan on each commit
+make check                     # lint + typecheck + unit tests, as CI runs them
+make format                    # apply ruff formatting and fixes
+```
