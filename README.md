@@ -11,6 +11,9 @@ poison events), not feature breadth.
 
 Phase 1 (contracts) in progress. Nothing described above is implemented yet.
 
+- [Architecture](docs/architecture.md): target design, data flow, crash points, build order
+- [Architecture decision records](docs/adr/README.md)
+
 ## Development
 
 Needs [uv](https://docs.astral.sh/uv/) (it installs Python 3.12 from `.python-version`).
