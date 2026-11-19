@@ -25,3 +25,18 @@ uv run pre-commit install      # optional: lint, typecheck and secret scan on ea
 make check                     # lint + typecheck + unit tests, as CI runs them
 make format                    # apply ruff formatting and fixes
 ```
+
+Integration tests need Docker:
+
+```sh
+make up                        # Kafka 4.3.2 on 127.0.0.1:9092, waits until healthy
+make topics                    # declare orders.placed.v1 (6 partitions); safe to rerun
+make test-integration          # tests against that broker, on their own test.* topics
+make down                      # stop; the data volume is kept
+```
+
+Integration tests create their own `test.<id>` topics and do not delete them; they stay in the
+Kafka data volume until it is removed.
+
+The broker refuses to create topics on first use, so `make topics` must run before anything
+writes to `orders.placed.v1`.

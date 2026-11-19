@@ -78,6 +78,15 @@ measurement; they varied by up to a second between runs.
    route, or `AIOProducer` in an async route) is decided in ADR 0003, with its own measurement. Both
    showed a bounded failure in the spike.
 
+**Update 2026-11-19 (phase 2, slice 1):** `confluent-kafka` was added at 2.16.2, the current
+version, which bundles the same librdkafka 2.16.0. As decision 2 requires, the `confluent-kafka`
+spike script was rerun with it against the project's Compose broker (same image, configuration
+spelled out in `compose.yaml`): every `confluent-kafka` check in the spike table passed again,
+and a paused broker gave `_MSG_TIMED_OUT` after 5.6 s. Setting up Compose also showed that the
+`apache/kafka` image ignores its built-in defaults as soon as any `KAFKA_*` variable is set, so
+`compose.yaml` spells out the whole single-node configuration and turns off
+`auto.create.topics.enable`.
+
 ## Consequences
 
 - The consumer loop reads top to bottom with no event loop, so the order "database commit, then

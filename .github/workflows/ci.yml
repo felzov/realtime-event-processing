@@ -34,6 +34,34 @@ jobs:
       - name: Lint, typecheck and unit tests
         run: make check
 
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      # The same compose.yaml as locally, not a service container: one Kafka configuration to
+      # keep correct instead of two.
+      - name: Start Kafka
+        run: make up
+
+      - name: Declare orders.placed.v1
+        run: make topics
+
+      - name: Integration tests (Kafka)
+        run: make test-integration
+
+      - name: Kafka logs on failure
+        if: failure()
+        run: docker compose logs kafka --tail 200
+
   secrets:
     # The gitleaks pre-commit hook only scans staged changes and only where hooks are installed,
     # so CI scans the whole history: a secret removed in a later commit is still leaked.

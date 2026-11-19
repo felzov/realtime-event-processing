@@ -1,0 +1,46 @@
+# Local services for development and integration tests. CI starts the same file, so local and CI
+# brokers cannot drift apart. PostgreSQL is added in phase 3.
+services:
+  kafka:
+    # ADR 0002: exact tag, pinned by digest.
+    image: apache/kafka:4.3.2@sha256:852a0d49fc4e656b022e7f23785411802c9a088c78a7c5e39f33969de9c227a7
+    # Setting any KAFKA_* variable makes the image ignore its built-in defaults, so the whole
+    # single-node KRaft configuration is spelled out. It matches the image's default
+    # server.properties (which the ADR 0002 spike ran against) except where commented.
+    environment:
+      CLUSTER_ID: EFOO7VAAQWCAtD57O3TaGg
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      # Clients connect to the address the broker advertises, not to the bootstrap address.
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      # Changed: in the named volume instead of /tmp.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      # Changed: topics exist only if `make topics` declared them (broker/topics.py).
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # Changed: a consumer group's first assignment starts at once instead of after 3 s.
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    ports:
+      # Reachable only from this machine. The controller port stays inside the container.
+      - "127.0.0.1:9092:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      # Healthy once the broker answers a client request, not just when the JVM is up.
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null"]
+      interval: 5s
+      timeout: 20s
+      retries: 12
+      start_period: 30s
+
+volumes:
+  kafka-data:
