@@ -1,4 +1,4 @@
-# realtime-event-processing
+# realtime-event-processing-system
 
 A small real-time event pipeline: an ingest API writes versioned `order.placed` events to a broker
 (Apache Kafka, [ADR 0002](docs/adr/0002-broker-and-client-stack.md)), a consumer group validates

@@ -1,5 +1,5 @@
 [project]
-name = "realtime-event-processing"
+name = "realtime-event-processing-system"
 version = "0.1.0"
 description = "Real-time event pipeline with explicit failure behaviour: versioned events in, per-window aggregates out."
 readme = "README.md"

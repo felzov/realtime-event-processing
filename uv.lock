@@ -634,7 +634,7 @@ wheels = [
 ]
 
 [[package]]
-name = "realtime-event-processing"
+name = "realtime-event-processing-system"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
