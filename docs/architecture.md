@@ -3,8 +3,8 @@
 This is the **target** design. Most of it is not built yet; the [component table](#components)
 says which phase builds each part. Decisions are recorded in [ADRs](adr/README.md).
 
-The broker is shown as Kafka, the current leaning. The broker and its Python client are decided in
-ADR 0002, after a spike against the real broker.
+The broker is Apache Kafka 4.3.2 in KRaft mode, used through `confluent-kafka`; the consumer and
+the database access are synchronous ([ADR 0002](adr/0002-broker-and-client-stack.md)).
 
 ## Data flow
 

@@ -7,7 +7,7 @@ the same file.
 | ADR | Title | Status |
 |-----|-------|--------|
 | [0001](0001-event-contract.md) | Event contract | Accepted |
-| 0002 | Broker and client stack | Planned (phase 1, after a broker spike) |
+| [0002](0002-broker-and-client-stack.md) | Broker and client stack | Accepted |
 | 0003 | Ingest acknowledgement | Planned (phase 2) |
 | 0004 | Offsets and database consistency | Planned (phase 3) |
 | 0005 | Windows and late events | Planned (phase 4) |

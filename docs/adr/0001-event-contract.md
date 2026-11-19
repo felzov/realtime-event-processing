@@ -103,6 +103,13 @@ needed a precise rule. Each is enforced in `src/event_pipeline/domain/events.py`
 - For `unknown_field`, the reported path is the object that contains the unknown key, not the key
   itself: the key name is client input and is not echoed.
 
+**Update 2026-11-19 (phase 1, slice 3):** "the default partitioner" in decision 5 depends on the
+client. The broker spike showed that librdkafka's default (used by `confluent-kafka`) puts keys on
+different partitions from the Java client's. Every producer therefore sets the murmur2 partitioner
+explicitly, so a key maps to the same partition as with Kafka's own tools
+([ADR 0002](0002-broker-and-client-stack.md), decision 3). The rule in decision 5 is unchanged: the
+partition is the key's hash modulo the partition count.
+
 ## Consequences
 
 - A client that retries after a timeout must resend the same `event_id`. A client that generates a
