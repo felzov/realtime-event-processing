@@ -1,0 +1,251 @@
+"""EventPublisher without a broker: outcome mapping, the poll thread's failure modes, the backstop.
+
+The producers here point at 127.0.0.1:1, where nothing listens, so nothing is ever delivered.
+"""
+
+import asyncio
+import logging
+import time
+from datetime import UTC, datetime, timedelta, timezone
+from typing import Any
+
+import pytest
+from confluent_kafka import KafkaError, Message, Producer
+
+from event_pipeline.broker.publisher import (
+    CAUSE_BACKSTOP,
+    CAUSE_CALLBACK_ERROR,
+    CAUSE_NO_OFFSET,
+    CAUSE_POLL_THREAD_DEAD,
+    CAUSE_QUEUE_FULL,
+    Delivered,
+    Delivery,
+    EventPublisher,
+    NotDelivered,
+    PublishFailure,
+    _outcome,
+    _resolve,
+    classify,
+    format_received_at,
+)
+
+UNREACHABLE: dict[str, Any] = {"bootstrap.servers": "127.0.0.1:1"}
+RECEIVED_AT = datetime(2026, 11, 19, 15, 36, 33, 191000, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (KafkaError(KafkaError._MSG_TIMED_OUT), PublishFailure.BROKER_UNAVAILABLE),
+        (
+            KafkaError(KafkaError.NOT_ENOUGH_REPLICAS, retriable=True),
+            PublishFailure.BROKER_UNAVAILABLE,
+        ),
+        (KafkaError(KafkaError.MSG_SIZE_TOO_LARGE), PublishFailure.REJECTED),
+        (KafkaError(KafkaError.TOPIC_AUTHORIZATION_FAILED), PublishFailure.REJECTED),
+    ],
+    ids=["timed_out", "retriable", "too_large", "not_authorized"],
+)
+def test_classify_maps_kafka_errors(error: KafkaError, expected: PublishFailure) -> None:
+    assert classify(error) == NotDelivered(expected, error.name())
+
+
+def test_received_at_is_rfc3339_utc_with_microseconds() -> None:
+    assert format_received_at(RECEIVED_AT) == b"2026-11-19T15:36:33.191000Z"
+
+
+def test_received_at_with_another_offset_is_converted_to_utc() -> None:
+    plus_two = RECEIVED_AT.astimezone(timezone(timedelta(hours=2)))
+
+    assert format_received_at(plus_two) == b"2026-11-19T15:36:33.191000Z"
+
+
+def test_naive_received_at_is_refused() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        format_received_at(datetime(2026, 11, 19, 15, 36, 33))
+
+
+def test_successful_report_becomes_delivered() -> None:
+    message = Message(topic="t", partition=2, offset=7)
+
+    assert _outcome(None, message) == Delivered(partition=2, offset=7)
+
+
+def test_report_without_an_offset_is_not_called_a_success(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    message = Message(topic="t", partition=2, offset=-1001)
+
+    with caplog.at_level(logging.ERROR):
+        outcome = _outcome(None, message)
+
+    assert outcome == NotDelivered(PublishFailure.PUBLISHER_FAILED, CAUSE_NO_OFFSET)
+    assert "delivery report without an offset" in caplog.text
+
+
+def test_failed_report_is_classified() -> None:
+    error = KafkaError(KafkaError._MSG_TIMED_OUT)
+
+    assert _outcome(error, Message(topic="t")) == classify(error)
+
+
+def test_late_report_for_a_finished_request_is_ignored() -> None:
+    async def scenario() -> Delivery:
+        future: asyncio.Future[Delivery] = asyncio.get_running_loop().create_future()
+        future.set_result(Delivered(0, 1))
+        _resolve(future, Delivered(0, 2))  # must not raise InvalidStateError
+        return future.result()
+
+    assert asyncio.run(scenario()) == Delivered(0, 1)
+
+
+def test_report_after_the_event_loop_closed_does_not_raise(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Raising would kill the poll thread and leave every later request without an answer.
+    loop = asyncio.new_event_loop()
+    future: asyncio.Future[Delivery] = loop.create_future()
+    loop.close()
+    callback = EventPublisher._on_delivery(loop, future)
+
+    with caplog.at_level(logging.WARNING):
+        callback(None, Message(topic="t", partition=0, offset=1))
+
+    assert "after its event loop closed" in caplog.text
+    assert not future.done()
+
+
+class _BrokenMessage(Message):
+    """A report whose handling raises, standing in for a bug in the callback."""
+
+    def partition(self) -> int | None:
+        raise ValueError("simulated bug while reading the report")
+
+
+def test_error_in_the_callback_answers_the_request_instead_of_raising(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Raising would escape through poll() and end the poll thread for every later request.
+    async def scenario() -> Delivery:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[Delivery] = loop.create_future()
+        EventPublisher._on_delivery(loop, future)(None, _BrokenMessage(topic="t", offset=1))
+        return await asyncio.wait_for(future, timeout=1.0)
+
+    with caplog.at_level(logging.ERROR):
+        outcome = asyncio.run(scenario())
+
+    assert outcome == NotDelivered(PublishFailure.PUBLISHER_FAILED, CAUSE_CALLBACK_ERROR)
+    assert "delivery callback failed" in caplog.text
+
+
+def test_message_over_the_size_limit_is_rejected_by_produce() -> None:
+    # librdkafka refuses it inside produce(), before any broker is involved.
+    producer = Producer({**UNREACHABLE, "message.max.bytes": 1000})
+    publisher = EventPublisher(producer, topic="t", backstop_s=5.0)
+    try:
+        outcome = asyncio.run(
+            publisher.publish(key="s", value=b"x" * 2000, received_at=RECEIVED_AT)
+        )
+    finally:
+        publisher.close(timeout_s=0.1)
+
+    assert outcome == NotDelivered(PublishFailure.REJECTED, "MSG_SIZE_TOO_LARGE")
+
+
+def test_full_local_queue_answers_broker_unavailable() -> None:
+    producer = Producer(
+        {**UNREACHABLE, "queue.buffering.max.messages": 1, "delivery.timeout.ms": 60_000}
+    )
+    publisher = EventPublisher(producer, topic="t", backstop_s=5.0)
+
+    async def two_publishes() -> Delivery:
+        # The first message fills the queue and stays there: nothing can deliver it.
+        first = asyncio.create_task(
+            publisher.publish(key="s", value=b"{}", received_at=RECEIVED_AT)
+        )
+        await asyncio.sleep(0)
+        second = await publisher.publish(key="s", value=b"{}", received_at=RECEIVED_AT)
+        first.cancel()
+        return second
+
+    try:
+        outcome = asyncio.run(two_publishes())
+    finally:
+        publisher.close(timeout_s=0.1)
+
+    assert outcome == NotDelivered(PublishFailure.BROKER_UNAVAILABLE, CAUSE_QUEUE_FULL)
+
+
+class _DeadPollProducer(Producer):
+    """A real producer whose `poll()` fails, as an exception escaping a callback would."""
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__(config)
+        self.produced = 0
+
+    def poll(self, timeout: float = -1) -> int:
+        raise RuntimeError("simulated failure in poll")
+
+    def produce(self, *args: Any, **kwargs: Any) -> None:
+        self.produced += 1
+
+
+def _wait_until_not_polling(publisher: EventPublisher) -> None:
+    deadline = time.monotonic() + 2.0
+    while publisher.is_polling() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+def test_dead_poll_thread_is_detected_and_nothing_is_produced(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    producer = _DeadPollProducer(UNREACHABLE)
+    with caplog.at_level(logging.ERROR):
+        publisher = EventPublisher(producer, topic="t", backstop_s=5.0)
+        _wait_until_not_polling(publisher)
+
+    assert not publisher.is_polling()
+    assert "poll thread died" in caplog.text
+
+    started = time.monotonic()
+    outcome = asyncio.run(publisher.publish(key="s", value=b"{}", received_at=RECEIVED_AT))
+
+    assert outcome == NotDelivered(PublishFailure.PUBLISHER_FAILED, CAUSE_POLL_THREAD_DEAD)
+    assert time.monotonic() - started < 1.0  # at once, not after the backstop
+    assert producer.produced == 0
+
+
+def test_backstop_answers_when_no_report_arrives(caplog: pytest.LogCaptureFixture) -> None:
+    # delivery.timeout.ms far beyond the backstop stands in for "librdkafka never reports",
+    # which the settings validator prevents in a real configuration.
+    producer = Producer({**UNREACHABLE, "delivery.timeout.ms": 60_000})
+    publisher = EventPublisher(producer, topic="t", backstop_s=0.3)
+
+    started = time.monotonic()
+    with caplog.at_level(logging.ERROR):
+        outcome = asyncio.run(publisher.publish(key="s", value=b"{}", received_at=RECEIVED_AT))
+    elapsed = time.monotonic() - started
+
+    assert outcome == NotDelivered(PublishFailure.PUBLISHER_FAILED, CAUSE_BACKSTOP)
+    assert 0.3 <= elapsed < 1.5
+    assert "no delivery report within the 0.3 s backstop" in caplog.text
+    # The message is still queued; close() gives up after its timeout and says how many are left.
+    assert publisher.close(timeout_s=0.2) == 1
+
+
+def test_close_stops_polling_and_is_idempotent() -> None:
+    publisher = EventPublisher(Producer(UNREACHABLE), topic="t", backstop_s=5.0)
+    assert publisher.is_polling()
+
+    assert publisher.close(timeout_s=1.0) == 0
+    assert publisher.close(timeout_s=1.0) == 0
+    assert not publisher.is_polling()
+
+
+def test_publish_after_close_is_a_programming_error() -> None:
+    publisher = EventPublisher(Producer(UNREACHABLE), topic="t", backstop_s=5.0)
+    publisher.close(timeout_s=1.0)
+
+    with pytest.raises(RuntimeError, match="after close"):
+        asyncio.run(publisher.publish(key="s", value=b"{}", received_at=RECEIVED_AT))

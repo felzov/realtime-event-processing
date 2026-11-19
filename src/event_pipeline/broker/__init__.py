@@ -1,1 +1,1 @@
-"""Kafka client configuration, topic declaration and, later, the producer and consumer."""
+"""Kafka client configuration, topic declaration, the event publisher and, later, the consumer."""
