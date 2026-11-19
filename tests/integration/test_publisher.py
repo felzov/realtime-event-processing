@@ -4,7 +4,6 @@ from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 
 import pytest
-from confluent_kafka import Consumer, Message, TopicPartition
 from confluent_kafka.admin import AdminClient
 
 from event_pipeline.broker.publisher import (
@@ -16,6 +15,7 @@ from event_pipeline.broker.publisher import (
 )
 from event_pipeline.broker.topics import TopicSpec, ensure_topic
 from event_pipeline.config import Settings
+from tests.integration.kafka_helpers import read_at
 
 TIMEOUT_S = 10.0
 CLOSE_TIMEOUT_S = 5.0
@@ -34,22 +34,6 @@ def publisher(topic: str, settings_for: Callable[..., Settings]) -> Iterator[Eve
     publisher = EventPublisher.from_settings(settings_for(events_topic=topic))
     yield publisher
     publisher.close(CLOSE_TIMEOUT_S)
-
-
-def read_at(bootstrap: str, topic: str, partition: int, offset: int) -> Message:
-    consumer = Consumer(
-        {"bootstrap.servers": bootstrap, "group.id": "unused", "enable.auto.commit": False}
-    )
-    try:
-        consumer.assign([TopicPartition(topic, partition, offset)])
-        deadline = time.monotonic() + TIMEOUT_S
-        while time.monotonic() < deadline:
-            message = consumer.poll(0.5)
-            if message is not None and message.error() is None:
-                return message
-        raise AssertionError(f"nothing at {topic}[{partition}]@{offset} within {TIMEOUT_S} s")
-    finally:
-        consumer.close()
 
 
 def test_delivered_message_is_on_the_topic_as_reported(
