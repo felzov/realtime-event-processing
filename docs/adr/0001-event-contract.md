@@ -110,6 +110,10 @@ explicitly, so a key maps to the same partition as with Kafka's own tools
 ([ADR 0002](0002-broker-and-client-stack.md), decision 3). The rule in decision 5 is unchanged: the
 partition is the key's hash modulo the partition count.
 
+**Update 2026-11-19 (phase 2, slice 2):** decision 4 is settled by
+[ADR 0003](0003-ingest-acknowledgement.md), decision 4: `received_at` travels as a Kafka header,
+so the message value stays the client's bytes.
+
 ## Consequences
 
 - A client that retries after a timeout must resend the same `event_id`. A client that generates a
