@@ -34,7 +34,7 @@ def test_producer_config_sets_the_adr_0002_guarantees() -> None:
     assert config["enable.idempotence"] is True
     assert config["partitioner"] == "murmur2_random"
     assert config["delivery.timeout.ms"] == 4000
-    assert config["bootstrap.servers"] == "localhost:9092"
+    assert config["bootstrap.servers"] == "127.0.0.1:9092"
 
 
 @pytest.mark.parametrize(

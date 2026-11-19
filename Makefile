@@ -4,7 +4,7 @@
 
 # The broker from `make up`. Override for another broker; a direct `pytest -m integration` run
 # without it fails instead of skipping.
-TEST_KAFKA_BOOTSTRAP_SERVERS ?= localhost:9092
+TEST_KAFKA_BOOTSTRAP_SERVERS ?= 127.0.0.1:9092
 export TEST_KAFKA_BOOTSTRAP_SERVERS
 
 install:

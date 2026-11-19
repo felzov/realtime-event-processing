@@ -21,7 +21,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     # Comma-separated host:port list. Plaintext and unauthenticated: local development only.
-    kafka_bootstrap_servers: str = Field(default="localhost:9092", min_length=1)
+    # 127.0.0.1 rather than localhost, matching the published port (compose.yaml).
+    kafka_bootstrap_servers: str = Field(default="127.0.0.1:9092", min_length=1)
 
     # Kafka allows up to 249 characters from this set. The partition count and the replication
     # factor are part of the topic's contract: changing the count moves stores to other

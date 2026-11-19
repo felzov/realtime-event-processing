@@ -110,7 +110,7 @@ def test_make_topics_entry_point_exits_1_on_mismatch(
 def test_make_topics_entry_point_exits_1_when_kafka_is_unreachable(
     unique_topic: Callable[[], str], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # Port 1 on localhost: nothing listens, so every connection is refused.
+    # Port 1 on 127.0.0.1: nothing listens, so every connection is refused.
     settings = Settings(  # type: ignore[call-arg]
         _env_file=None,
         kafka_bootstrap_servers="127.0.0.1:1",
