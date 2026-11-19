@@ -81,6 +81,21 @@ def classify(error: KafkaError) -> NotDelivered:
     return NotDelivered(PublishFailure.REJECTED, error.name())
 
 
+def log_client_error(error: KafkaError) -> None:
+    """librdkafka's `error_cb`, served by the poll thread like the delivery reports.
+
+    Most of these errors are transient (a broker connection dropped) and librdkafka recovers on its
+    own. A fatal one (possible with idempotence) leaves the producer unusable: every later
+    message fails, so it is logged as an error to stand out from ordinary rejections.
+    """
+    if error.fatal():
+        logger.error(
+            "fatal kafka client error, the producer is unusable: %s: %s", error.name(), error.str()
+        )
+    else:
+        logger.warning("kafka client error: %s: %s", error.name(), error.str())
+
+
 def format_received_at(received_at: datetime) -> bytes:
     """RFC 3339 in UTC with microseconds and `Z`, for example `2026-11-19T15:36:33.191000Z`."""
     if received_at.tzinfo is None:
@@ -106,7 +121,7 @@ class EventPublisher:
     @classmethod
     def from_settings(cls, settings: Settings) -> "EventPublisher":
         return cls(
-            Producer(producer_config(settings)),
+            Producer({**producer_config(settings), "error_cb": log_client_error}),
             topic=settings.events_topic,
             backstop_s=settings.publish_backstop_s,
         )
@@ -188,8 +203,9 @@ class EventPublisher:
             while not self._stop.is_set():
                 self._producer.poll(_POLL_INTERVAL_S)
         except Exception:
-            # An exception raised in a callback surfaces here. The thread ends, `is_polling()`
-            # turns False, and every later `publish()` answers PUBLISHER_FAILED at once.
+            # An exception escaping `poll()` (the delivery callback guards its own). The thread
+            # ends, `is_polling()` turns False, and every later `publish()` answers
+            # PUBLISHER_FAILED at once.
             logger.exception("producer poll thread died; delivery reports are no longer served")
 
     @staticmethod

@@ -63,8 +63,8 @@ producer configuration of ADR 0002 and its default batching (`batch_size=1000`,
    | `Delivered(partition, offset)` | Delivery report without an error | `202` `{event_id}` |
    | — | Body fails `parse_event` | `422` `event_rejected`, violations `[{path, code}]` |
    | — | Body over 16 KiB (`Content-Length` or counted while reading, before parsing) | `413` `body_too_large` |
-   | `broker_unavailable` | Report with `_MSG_TIMED_OUT` or a retriable error; local queue full (`BufferError`) | `503` `broker_unavailable` |
-   | `rejected` | Report with a non-retriable error | `500` `internal_error` |
+   | `broker_unavailable` | Report or `produce()` error with `_MSG_TIMED_OUT` or a retriable error; local queue full (`BufferError`) | `503` `broker_unavailable` |
+   | `rejected` | Report or `produce()` error with a non-retriable error | `500` `internal_error` |
    | `publisher_failed` | Poll thread dead (detected before producing); backstop fired; report without an offset; error in the delivery callback | `500` `internal_error` |
 
    Log lines carry the Kafka error name (for example `_MSG_TIMED_OUT`), never the message.
@@ -104,9 +104,10 @@ producer configuration of ADR 0002 and its default batching (`batch_size=1000`,
 ### Limitations
 
 - A **fatal** producer error (possible with idempotence, for example after an unrecoverable
-  sequence error) makes the producer unusable. It is answered `500` per request, but `/ready` does
-  not detect it and the producer is not recreated. Not tested: no way was found to trigger one
-  against a single local broker.
+  sequence error) makes the producer unusable. It is answered `500` per request and logged once
+  at `ERROR` by the producer's `error_cb` (non-fatal client errors at `WARNING`), but `/ready` does
+  not detect it and the producer is not recreated. The fatal path itself is not tested: no way was
+  found to trigger one against a single local broker.
 - A **misspelt or missing topic** is not reported as such: librdkafka waits for the topic until
   `delivery.timeout.ms` and reports `_MSG_TIMED_OUT` (measured in phase 2 slice 1), so it looks
   like an outage (`503`). `/ready` checks that the topic exists (slice 4).

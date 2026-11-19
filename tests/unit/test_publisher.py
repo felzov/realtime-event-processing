@@ -27,7 +27,9 @@ from event_pipeline.broker.publisher import (
     _resolve,
     classify,
     format_received_at,
+    log_client_error,
 )
+from event_pipeline.config import Settings
 
 UNREACHABLE: dict[str, Any] = {"bootstrap.servers": "127.0.0.1:1"}
 RECEIVED_AT = datetime(2026, 11, 19, 15, 36, 33, 191000, tzinfo=UTC)
@@ -249,3 +251,39 @@ def test_publish_after_close_is_a_programming_error() -> None:
 
     with pytest.raises(RuntimeError, match="after close"):
         asyncio.run(publisher.publish(key="s", value=b"{}", received_at=RECEIVED_AT))
+
+
+def test_fatal_client_error_is_logged_as_an_error(caplog: pytest.LogCaptureFixture) -> None:
+    # A fatal error leaves the producer unusable; it must stand out from ordinary rejections.
+    with caplog.at_level(logging.WARNING):
+        log_client_error(KafkaError(KafkaError._FATAL, "simulated", fatal=True))
+
+    (record,) = caplog.records
+    assert record.levelno == logging.ERROR
+    assert "fatal" in record.getMessage()
+    assert "_FATAL" in record.getMessage()
+
+
+def test_non_fatal_client_error_is_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING):
+        log_client_error(KafkaError(KafkaError._ALL_BROKERS_DOWN))
+
+    (record,) = caplog.records
+    assert record.levelno == logging.WARNING
+    assert "_ALL_BROKERS_DOWN" in record.getMessage()
+
+
+def test_publisher_from_settings_reports_client_errors(caplog: pytest.LogCaptureFixture) -> None:
+    # The poll thread serves error callbacks too; an unreachable broker produces one within about
+    # a second, which shows the callback is wired into the producer's configuration.
+    settings = Settings(_env_file=None, kafka_bootstrap_servers="127.0.0.1:1")  # type: ignore[call-arg]
+    with caplog.at_level(logging.WARNING, logger="event_pipeline.broker.publisher"):
+        publisher = EventPublisher.from_settings(settings)
+        try:
+            deadline = time.monotonic() + 5.0
+            while "kafka client error" not in caplog.text and time.monotonic() < deadline:
+                time.sleep(0.05)
+        finally:
+            publisher.close(timeout_s=0.1)
+
+    assert "kafka client error" in caplog.text
