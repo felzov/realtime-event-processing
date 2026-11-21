@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from event_pipeline.broker.publisher import RECEIVED_AT_HEADER, Delivered, Delivery, EventPublisher
 from event_pipeline.broker.topics import TopicSpec, ensure_topic
 from event_pipeline.config import Settings
-from event_pipeline.main import create_app
+from event_pipeline.main import create_app, create_app_from_settings
 from tests.integration.kafka_helpers import read_at
 from tests.samples import EVENT_ID, STORE_ID, encode, valid_event
 
@@ -32,6 +32,9 @@ class RecordingPublisher:
         outcome = await self.inner.publish(key=key, value=value, received_at=received_at)
         self.outcomes.append(outcome)
         return outcome
+
+    def unready_cause(self) -> str | None:
+        return self.inner.unready_cause()
 
 
 def post_event(app: FastAPI, raw: bytes) -> httpx.Response:
@@ -106,3 +109,24 @@ def test_unreachable_broker_answers_503_in_bounded_time(unique_topic: Callable[[
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "broker_unavailable"
     assert elapsed < settings.kafka_delivery_timeout_ms / 1000 + 2.5
+
+
+def test_app_from_settings_is_ready_against_the_broker_and_accepts_an_event(
+    topic: str, settings_for: Callable[..., Settings]
+) -> None:
+    # The app `make run` serves: its lifespan creates and closes the real publisher.
+    app = create_app_from_settings(settings_for(events_topic=topic))
+
+    async def scenario() -> tuple[httpx.Response, httpx.Response]:
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                ready = await client.get("/ready")
+                accepted = await client.post("/events", content=encode(valid_event()))
+                return ready, accepted
+
+    ready, accepted = asyncio.run(scenario())
+
+    assert ready.status_code == 200
+    assert accepted.status_code == 202
+    assert not app.state.publisher.is_polling()  # closed by the lifespan

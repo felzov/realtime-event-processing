@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     # should reach it, so it must outlast the delivery timeout by BACKSTOP_MARGIN_MS.
     publish_backstop_s: float = Field(default=10.0, gt=0)
 
+    # Bound on the broker metadata request behind `/ready`, so a probe against an unreachable
+    # broker answers 503 in about this long instead of hanging.
+    ready_timeout_s: float = Field(default=2.0, gt=0)
+    # On shutdown, how long to wait for delivery reports still outstanding (ADR 0003,
+    # decision 10). Messages still without a report after it may or may not reach the broker.
+    publisher_close_timeout_s: float = Field(default=5.0, gt=0)
+
     @model_validator(mode="after")
     def _backstop_outlasts_delivery_timeout(self) -> Self:
         # Otherwise the backstop would fire before librdkafka reports, turning an ordinary

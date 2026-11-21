@@ -112,3 +112,20 @@ def test_unreachable_broker_answers_broker_unavailable_in_bounded_time(
     # librdkafka's report, not the backstop: delivery.timeout.ms plus its ~1 s check interval.
     assert outcome == NotDelivered(PublishFailure.BROKER_UNAVAILABLE, "_MSG_TIMED_OUT")
     assert elapsed < settings.kafka_delivery_timeout_ms / 1000 + 2.5
+
+
+def test_publisher_is_ready_when_its_topic_exists(publisher: EventPublisher) -> None:
+    assert publisher.unready_cause() is None
+
+
+def test_missing_topic_makes_the_publisher_unready(
+    settings_for: Callable[..., Settings], unique_topic: Callable[[], str]
+) -> None:
+    # Never created: the broker refuses auto-creation and says the topic is unknown.
+    publisher = EventPublisher.from_settings(settings_for(events_topic=unique_topic()))
+    try:
+        cause = publisher.unready_cause()
+    finally:
+        publisher.close(CLOSE_TIMEOUT_S)
+
+    assert cause == "UNKNOWN_TOPIC_OR_PART"

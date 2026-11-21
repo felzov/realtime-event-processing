@@ -36,10 +36,15 @@ class ApiErrorCode(StrEnum):
     NOT_FOUND = "not_found"
     METHOD_NOT_ALLOWED = "method_not_allowed"
     INVALID_REQUEST = "invalid_request"
+    NOT_READY = "not_ready"
 
 
 class BodyTooLargeError(Exception):
     """The request body is over `MAX_BODY_BYTES`; raised before any of it is parsed."""
+
+
+class NotReadyError(Exception):
+    """`/ready` found a reason the API cannot publish now; the cause is logged, not returned."""
 
 
 class ViolationBody(BaseModel):
@@ -122,6 +127,14 @@ async def _handle_not_confirmed(request: Request, exc: Exception) -> JSONRespons
     return _internal_error()
 
 
+async def _handle_not_ready(request: Request, exc: Exception) -> JSONResponse:
+    return error_response(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        ApiErrorCode.NOT_READY,
+        "not ready to accept events",
+    )
+
+
 async def _handle_http_exception(request: Request, exc: Exception) -> JSONResponse:
     error = cast(HTTPException, exc)
     fallback = (
@@ -163,6 +176,7 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(EventRejectedError, _handle_event_rejected)
     app.add_exception_handler(BodyTooLargeError, _handle_body_too_large)
     app.add_exception_handler(EventNotConfirmedError, _handle_not_confirmed)
+    app.add_exception_handler(NotReadyError, _handle_not_ready)
     app.add_exception_handler(HTTPException, _handle_http_exception)
     app.add_exception_handler(ClientDisconnect, _handle_client_disconnect)
     app.add_exception_handler(Exception, _handle_unexpected)

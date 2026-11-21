@@ -64,6 +64,7 @@ type Delivery = Delivered | NotDelivered
 type DeliveryCallback = Callable[[KafkaError | None, Message], None]
 
 CAUSE_POLL_THREAD_DEAD: Final = "poll_thread_dead"
+CAUSE_CLOSED: Final = "publisher_closed"
 CAUSE_BACKSTOP: Final = "no_delivery_report"
 CAUSE_QUEUE_FULL: Final = "local_queue_full"
 CAUSE_CALLBACK_ERROR: Final = "delivery_callback_error"
@@ -107,10 +108,13 @@ def format_received_at(received_at: datetime) -> bytes:
 class EventPublisher:
     """Produces to one topic and awaits each delivery report, bounded by a backstop."""
 
-    def __init__(self, producer: Producer, topic: str, backstop_s: float) -> None:
+    def __init__(
+        self, producer: Producer, topic: str, backstop_s: float, ready_timeout_s: float
+    ) -> None:
         self._producer = producer
         self._topic = topic
         self._backstop_s = backstop_s
+        self._ready_timeout_s = ready_timeout_s
         self._closed = False
         self._stop = threading.Event()
         self._poll_thread = threading.Thread(
@@ -124,11 +128,57 @@ class EventPublisher:
             Producer({**producer_config(settings), "error_cb": log_client_error}),
             topic=settings.events_topic,
             backstop_s=settings.publish_backstop_s,
+            ready_timeout_s=settings.ready_timeout_s,
         )
 
     def is_polling(self) -> bool:
-        """False once the poll thread has died or the publisher was closed. `/ready` checks it."""
+        """False once the poll thread has died or the publisher was closed."""
         return self._poll_thread.is_alive()
+
+    def unready_cause(self) -> str | None:
+        """Why `publish()` cannot succeed right now, or None if it can. `/ready` calls it.
+
+        Checks, in order: the publisher is open and its poll thread alive (no network call), the
+        broker answers a metadata request within the ready timeout, the topic exists there, and
+        every partition has a leader (a message for a leaderless partition would wait for
+        `delivery.timeout.ms` and answer 503). The cause is `publisher_closed`,
+        `poll_thread_dead` or a Kafka error name such as `_TRANSPORT` (no broker answered),
+        `UNKNOWN_TOPIC_OR_PART` or `LEADER_NOT_AVAILABLE`; it is safe to log. Blocks for up to
+        the ready timeout.
+
+        A fatal producer error is not detected (ADR 0003, limitations): metadata requests still
+        succeed after one.
+        """
+        if self._closed:
+            return CAUSE_CLOSED
+        if not self._poll_thread.is_alive():
+            return CAUSE_POLL_THREAD_DEAD
+        try:
+            # The producer's own handle is thread-safe, so this can run beside the poll thread.
+            # Asking for one topic keeps the request small; the broker does not create it
+            # (auto-create is off), it answers UNKNOWN_TOPIC_OR_PART.
+            metadata = self._producer.list_topics(topic=self._topic, timeout=self._ready_timeout_s)
+        except KafkaException as exc:
+            error: KafkaError = exc.args[0]
+            return error.name()
+        unknown = KafkaError(KafkaError.UNKNOWN_TOPIC_OR_PART).name()
+        topic = metadata.topics.get(self._topic)
+        if topic is None:
+            # Not seen from librdkafka (a missing topic comes back with an error); kept so an
+            # answer without the topic can never read as ready.
+            return unknown
+        topic_error: KafkaError | None = topic.error
+        if topic_error is not None:
+            return topic_error.name()
+        if not topic.partitions:
+            return unknown
+        for partition in topic.partitions.values():
+            partition_error: KafkaError | None = partition.error
+            if partition_error is not None:
+                return partition_error.name()
+            if partition.leader < 0:
+                return KafkaError(KafkaError.LEADER_NOT_AVAILABLE).name()
+        return None
 
     async def publish(self, *, key: str, value: bytes, received_at: datetime) -> Delivery:
         """Produce one message and wait for the broker's answer.

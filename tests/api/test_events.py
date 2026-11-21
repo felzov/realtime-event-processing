@@ -8,65 +8,20 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 
-import httpx
 import pytest
-from fastapi import FastAPI
 from starlette.types import Message, Scope
 
-from event_pipeline.broker.publisher import Delivered, Delivery, NotDelivered, PublishFailure
+from event_pipeline.broker.publisher import Delivery, NotDelivered, PublishFailure
 from event_pipeline.domain.events import MAX_BODY_BYTES
 from event_pipeline.main import create_app
+from tests.api.helpers import FakePublisher, error_of, send
 from tests.samples import EVENT_ID, STORE_ID, encode, valid_event
 
 # Distinctive text placed in rejected input; no response may contain it.
 MARKER = "ECHO-MARKER-7f3a"
-DELIVERED = Delivered(partition=3, offset=41)
-
-
-@dataclass(frozen=True, slots=True)
-class PublishCall:
-    key: str
-    value: bytes
-    received_at: datetime
-
-
-class FakePublisher:
-    def __init__(self, outcome: Delivery | Exception = DELIVERED) -> None:
-        self.outcome = outcome
-        self.calls: list[PublishCall] = []
-
-    async def publish(self, *, key: str, value: bytes, received_at: datetime) -> Delivery:
-        self.calls.append(PublishCall(key, value, received_at))
-        if isinstance(self.outcome, Exception):
-            raise self.outcome
-        return self.outcome
-
-
-def send(
-    app: FastAPI,
-    method: str = "POST",
-    path: str = "/events",
-    raise_app_exceptions: bool = True,
-    **kwargs: Any,
-) -> httpx.Response:
-    async def request() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app, raise_app_exceptions=raise_app_exceptions)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.request(method, path, **kwargs)
-
-    return asyncio.run(request())
-
-
-def error_of(response: httpx.Response) -> dict[str, Any]:
-    body: dict[str, Any] = response.json()
-    assert set(body) == {"error"}
-    assert set(body["error"]) == {"code", "message", "violations"}
-    error: dict[str, Any] = body["error"]
-    return error
 
 
 # --- 202: the broker acknowledged ----------------------------------------------------------------

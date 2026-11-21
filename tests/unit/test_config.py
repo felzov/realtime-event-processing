@@ -65,6 +65,8 @@ def test_backstop_with_2s_margin_is_accepted() -> None:
         {"kafka_delivery_timeout_ms": 0},
         {"kafka_admin_timeout_s": 0},
         {"kafka_bootstrap_servers": ""},
+        {"ready_timeout_s": 0},
+        {"publisher_close_timeout_s": 0},
     ],
     ids=[
         "topic_with_space",
@@ -75,6 +77,8 @@ def test_backstop_with_2s_margin_is_accepted() -> None:
         "zero_delivery_timeout",
         "zero_admin_timeout",
         "empty_bootstrap",
+        "zero_ready_timeout",
+        "zero_close_timeout",
     ],
 )
 def test_invalid_settings_are_rejected(overrides: dict[str, Any]) -> None:

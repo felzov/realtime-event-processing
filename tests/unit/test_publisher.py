@@ -11,10 +11,16 @@ from typing import Any
 
 import pytest
 from confluent_kafka import KafkaError, Message, Producer
+from confluent_kafka.admin import (  # type: ignore[attr-defined]
+    ClusterMetadata,
+    PartitionMetadata,
+    TopicMetadata,
+)
 
 from event_pipeline.broker.publisher import (
     CAUSE_BACKSTOP,
     CAUSE_CALLBACK_ERROR,
+    CAUSE_CLOSED,
     CAUSE_NO_OFFSET,
     CAUSE_POLL_THREAD_DEAD,
     CAUSE_QUEUE_FULL,
@@ -33,6 +39,7 @@ from event_pipeline.config import Settings
 
 UNREACHABLE: dict[str, Any] = {"bootstrap.servers": "127.0.0.1:1"}
 RECEIVED_AT = datetime(2026, 11, 19, 15, 36, 33, 191000, tzinfo=UTC)
+READY_TIMEOUT_S = 0.5
 
 
 @pytest.mark.parametrize(
@@ -144,7 +151,7 @@ def test_error_in_the_callback_answers_the_request_instead_of_raising(
 def test_message_over_the_size_limit_is_rejected_by_produce() -> None:
     # librdkafka refuses it inside produce(), before any broker is involved.
     producer = Producer({**UNREACHABLE, "message.max.bytes": 1000})
-    publisher = EventPublisher(producer, topic="t", backstop_s=5.0)
+    publisher = EventPublisher(producer, topic="t", backstop_s=5.0, ready_timeout_s=READY_TIMEOUT_S)
     try:
         outcome = asyncio.run(
             publisher.publish(key="s", value=b"x" * 2000, received_at=RECEIVED_AT)
@@ -159,7 +166,7 @@ def test_full_local_queue_answers_broker_unavailable() -> None:
     producer = Producer(
         {**UNREACHABLE, "queue.buffering.max.messages": 1, "delivery.timeout.ms": 60_000}
     )
-    publisher = EventPublisher(producer, topic="t", backstop_s=5.0)
+    publisher = EventPublisher(producer, topic="t", backstop_s=5.0, ready_timeout_s=READY_TIMEOUT_S)
 
     async def two_publishes() -> Delivery:
         # The first message fills the queue and stays there: nothing can deliver it.
@@ -185,12 +192,17 @@ class _DeadPollProducer(Producer):
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
         self.produced = 0
+        self.metadata_requests = 0
 
     def poll(self, timeout: float = -1) -> int:
         raise RuntimeError("simulated failure in poll")
 
     def produce(self, *args: Any, **kwargs: Any) -> None:
         self.produced += 1
+
+    def list_topics(self, *args: Any, **kwargs: Any) -> Any:
+        self.metadata_requests += 1
+        return super().list_topics(*args, **kwargs)
 
 
 def _wait_until_not_polling(publisher: EventPublisher) -> None:
@@ -204,7 +216,9 @@ def test_dead_poll_thread_is_detected_and_nothing_is_produced(
 ) -> None:
     producer = _DeadPollProducer(UNREACHABLE)
     with caplog.at_level(logging.ERROR):
-        publisher = EventPublisher(producer, topic="t", backstop_s=5.0)
+        publisher = EventPublisher(
+            producer, topic="t", backstop_s=5.0, ready_timeout_s=READY_TIMEOUT_S
+        )
         _wait_until_not_polling(publisher)
 
     assert not publisher.is_polling()
@@ -218,11 +232,111 @@ def test_dead_poll_thread_is_detected_and_nothing_is_produced(
     assert producer.produced == 0
 
 
+def test_dead_poll_thread_makes_the_publisher_unready_without_asking_the_broker() -> None:
+    producer = _DeadPollProducer(UNREACHABLE)
+    publisher = EventPublisher(producer, topic="t", backstop_s=5.0, ready_timeout_s=READY_TIMEOUT_S)
+    _wait_until_not_polling(publisher)
+
+    assert publisher.unready_cause() == CAUSE_POLL_THREAD_DEAD
+    assert producer.metadata_requests == 0
+
+
+def test_unreachable_broker_makes_the_publisher_unready_within_the_ready_timeout() -> None:
+    publisher = EventPublisher(
+        Producer(UNREACHABLE), topic="t", backstop_s=5.0, ready_timeout_s=READY_TIMEOUT_S
+    )
+    try:
+        started = time.monotonic()
+        cause = publisher.unready_cause()
+        elapsed = time.monotonic() - started
+    finally:
+        publisher.close(timeout_s=0.1)
+
+    # librdkafka's name for "no broker could be reached" (measured against 127.0.0.1:1).
+    assert cause == "_TRANSPORT"
+    # Both bounds: librdkafka waits exactly the timeout it is given, so this also proves the
+    # setting (not some other timeout) reaches the metadata request.
+    assert READY_TIMEOUT_S - 0.1 <= elapsed < READY_TIMEOUT_S + 1.0
+
+
+def test_closed_publisher_is_unready() -> None:
+    publisher = EventPublisher(
+        Producer(UNREACHABLE), topic="t", backstop_s=5.0, ready_timeout_s=READY_TIMEOUT_S
+    )
+    publisher.close(timeout_s=0.1)
+
+    # A normal shutdown, not a crashed thread: the log line must not read like one.
+    assert publisher.unready_cause() == CAUSE_CLOSED
+
+
+class _MetadataProducer(Producer):
+    """A real producer (its poll thread works) whose metadata answer is set by the test."""
+
+    def __init__(self, metadata: ClusterMetadata) -> None:
+        super().__init__(UNREACHABLE)
+        self.metadata = metadata
+
+    def list_topics(self, *args: Any, **kwargs: Any) -> ClusterMetadata:
+        return self.metadata
+
+
+def _partition(partition_id: int, leader: int = 1, error: KafkaError | None = None) -> Any:
+    partition = PartitionMetadata()
+    partition.id, partition.leader, partition.error = partition_id, leader, error
+    return partition
+
+
+def _metadata(topic: str, partitions: list[Any] | None, error: KafkaError | None = None) -> Any:
+    metadata = ClusterMetadata()
+    if partitions is not None:
+        topic_metadata = TopicMetadata()
+        topic_metadata.topic, topic_metadata.error = topic, error
+        topic_metadata.partitions = {p.id: p for p in partitions}
+        metadata.topics = {topic: topic_metadata}
+    return metadata
+
+
+@pytest.mark.parametrize(
+    ("partitions", "topic_error", "expected"),
+    [
+        ([_partition(0), _partition(1)], None, None),
+        (None, None, "UNKNOWN_TOPIC_OR_PART"),
+        ([], KafkaError(KafkaError.UNKNOWN_TOPIC_OR_PART), "UNKNOWN_TOPIC_OR_PART"),
+        ([], None, "UNKNOWN_TOPIC_OR_PART"),
+        (
+            [_partition(0), _partition(1, error=KafkaError(KafkaError.LEADER_NOT_AVAILABLE))],
+            None,
+            "LEADER_NOT_AVAILABLE",
+        ),
+        ([_partition(0), _partition(1, leader=-1)], None, "LEADER_NOT_AVAILABLE"),
+    ],
+    ids=[
+        "all_partitions_led",
+        "topic_absent",
+        "topic_error",
+        "no_partitions",
+        "partition_error",
+        "partition_without_leader",
+    ],
+)
+def test_unready_unless_every_partition_has_a_leader(
+    partitions: list[Any] | None, topic_error: KafkaError | None, expected: str | None
+) -> None:
+    # A message for a partition without a leader waits for delivery.timeout.ms and answers 503,
+    # so `/ready` must not say 200 while one exists.
+    producer = _MetadataProducer(_metadata("t", partitions, topic_error))
+    publisher = EventPublisher(producer, topic="t", backstop_s=5.0, ready_timeout_s=READY_TIMEOUT_S)
+    try:
+        assert publisher.unready_cause() == expected
+    finally:
+        publisher.close(timeout_s=0.1)
+
+
 def test_backstop_answers_when_no_report_arrives(caplog: pytest.LogCaptureFixture) -> None:
     # delivery.timeout.ms far beyond the backstop stands in for "librdkafka never reports",
     # which the settings validator prevents in a real configuration.
     producer = Producer({**UNREACHABLE, "delivery.timeout.ms": 60_000})
-    publisher = EventPublisher(producer, topic="t", backstop_s=0.3)
+    publisher = EventPublisher(producer, topic="t", backstop_s=0.3, ready_timeout_s=READY_TIMEOUT_S)
 
     started = time.monotonic()
     with caplog.at_level(logging.ERROR):
@@ -237,7 +351,9 @@ def test_backstop_answers_when_no_report_arrives(caplog: pytest.LogCaptureFixtur
 
 
 def test_close_stops_polling_and_is_idempotent() -> None:
-    publisher = EventPublisher(Producer(UNREACHABLE), topic="t", backstop_s=5.0)
+    publisher = EventPublisher(
+        Producer(UNREACHABLE), topic="t", backstop_s=5.0, ready_timeout_s=READY_TIMEOUT_S
+    )
     assert publisher.is_polling()
 
     assert publisher.close(timeout_s=1.0) == 0
@@ -246,7 +362,9 @@ def test_close_stops_polling_and_is_idempotent() -> None:
 
 
 def test_publish_after_close_is_a_programming_error() -> None:
-    publisher = EventPublisher(Producer(UNREACHABLE), topic="t", backstop_s=5.0)
+    publisher = EventPublisher(
+        Producer(UNREACHABLE), topic="t", backstop_s=5.0, ready_timeout_s=READY_TIMEOUT_S
+    )
     publisher.close(timeout_s=1.0)
 
     with pytest.raises(RuntimeError, match="after close"):

@@ -1,6 +1,6 @@
 .RECIPEPREFIX = >
 
-.PHONY: install lint format typecheck test test-integration check check-all up down topics
+.PHONY: install lint format typecheck test test-integration check check-all up down topics run
 
 # The broker from `make up`. Override for another broker; a direct `pytest -m integration` run
 # without it fails instead of skipping.
@@ -45,3 +45,8 @@ down:
 # Creates orders.placed.v1, or checks that the existing topic matches its declaration.
 topics:
 > uv run --locked python -m event_pipeline.broker.topics
+
+# The ingest API on 127.0.0.1:8000. It starts without a broker; /ready answers 200 once Kafka is up
+# (`make up`) and the topic exists (`make topics`).
+run:
+> uv run --locked uvicorn event_pipeline.main:create_app_from_settings --factory --host 127.0.0.1 --port 8000

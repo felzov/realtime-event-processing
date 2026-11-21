@@ -1,12 +1,19 @@
 """FastAPI dependencies: the publisher `create_app` stores on `app.state`, and the capped body."""
 
-from typing import Annotated
+from typing import Annotated, Protocol
 
 from fastapi import Depends, Request
 
 from event_pipeline.api.errors import BodyTooLargeError
 from event_pipeline.domain.events import MAX_BODY_BYTES
 from event_pipeline.services.ingest import Publisher
+
+
+class ReadinessProbe(Protocol):
+    """What `/ready` needs from `broker.publisher.EventPublisher`; the API tests pass a fake."""
+
+    def unready_cause(self) -> str | None: ...
+
 
 # More digits than this is over any cap this API could have, without parsing the number.
 _MAX_LENGTH_DIGITS = 20
@@ -15,6 +22,12 @@ _MAX_LENGTH_DIGITS = 20
 def _publisher(request: Request) -> Publisher:
     publisher: Publisher = request.app.state.publisher
     return publisher
+
+
+def _readiness(request: Request) -> ReadinessProbe:
+    # The same object as the publisher: what `/ready` reports is whether it can publish.
+    probe: ReadinessProbe = request.app.state.publisher
+    return probe
 
 
 async def _capped_body(request: Request) -> bytes:
@@ -49,4 +62,5 @@ async def _capped_body(request: Request) -> bytes:
 
 
 AppPublisher = Annotated[Publisher, Depends(_publisher)]
+AppReadiness = Annotated[ReadinessProbe, Depends(_readiness)]
 CappedBody = Annotated[bytes, Depends(_capped_body)]
