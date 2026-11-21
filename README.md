@@ -10,7 +10,11 @@ poison events), not feature breadth.
 
 ## Status
 
-Phase 1 (contracts) in progress. Nothing described above is implemented yet.
+Phases 1 (event contract) and 2 (ingest) are built: `POST /events` validates an event and answers
+`202` only after Kafka acknowledged it with `acks=all`
+([ADR 0003](docs/adr/0003-ingest-acknowledgement.md)). The consumer, PostgreSQL aggregates and
+the query API come in phase 3; the [component table](docs/architecture.md#components) has the
+build order. This is a learning project, not a production service.
 
 - [Architecture](docs/architecture.md): target design, data flow, crash points, build order
 - [Architecture decision records](docs/adr/README.md)
@@ -40,3 +44,30 @@ Kafka data volume until it is removed.
 
 The broker refuses to create topics on first use, so `make topics` must run before anything
 writes to `orders.placed.v1`.
+
+## Running the ingest API
+
+```sh
+make up && make topics
+make run                       # uvicorn on 127.0.0.1:8000; Ctrl+C stops it
+curl -s 127.0.0.1:8000/ready   # {"status":"ready"} once Kafka answers and the topic exists
+```
+
+| Endpoint | Answer |
+|----------|--------|
+| `POST /events` | `202 {"event_id"}` after the broker acknowledged; `422` invalid event, `413` body over 16 KiB, `503` not confirmed (retry with the same `event_id`), `500` otherwise |
+| `GET /health` | `200` whenever the process serves HTTP; checks nothing else |
+| `GET /ready` | `200` if the producer's poll thread is alive, the broker answers and the topic exists; `503 not_ready` otherwise, within `READY_TIMEOUT_S` (2 s) |
+
+Settings come from environment variables or a local `.env` file (`src/event_pipeline/config.py`).
+The API starts even when Kafka is down; `/ready` reports it. On shutdown it waits up to
+`PUBLISHER_CLOSE_TIMEOUT_S` (5 s) for delivery reports still outstanding.
+
+### Limitations
+
+- No authentication or rate limiting, and the broker connection is plaintext: local use only.
+- One API process holds one producer; running several is untested.
+- `/ready` does not detect a fatal producer error (ADR 0003, limitations), and an outage logs one
+  warning per probe.
+- The app's own `INFO` log lines are not shown under `make run` (no logging configuration yet);
+  warnings and errors are.

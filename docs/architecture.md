@@ -1,7 +1,7 @@
 # Architecture
 
-This is the **target** design. Most of it is not built yet; the [component table](#components)
-says which phase builds each part. Decisions are recorded in [ADRs](adr/README.md).
+This is the **target** design. Only the ingest side is built so far; the
+[component table](#components) says which phase builds each part. Decisions are recorded in [ADRs](adr/README.md).
 
 The broker is Apache Kafka 4.3.2 in KRaft mode, used through `confluent-kafka`; the consumer and
 the database access are synchronous ([ADR 0002](adr/0002-broker-and-client-stack.md)).
@@ -96,10 +96,11 @@ business rules.
 
 | Component | Responsibility | Built in phase | Status |
 |-----------|----------------|----------------|--------|
-| `domain/` | Event envelope and payload schemas, error codes, window assignment | 1 | Not built |
-| Kafka + PostgreSQL in Docker Compose | Local broker and database | 2 | Not built |
-| `broker/` producer, ingest API (`POST /events`) | Validate, produce with `acks=all`, answer after the broker acknowledged | 2 | Not built |
-| `/health`, `/ready` | Liveness; readiness of database, broker and migrations | 2 | Not built |
+| `domain/` | Event envelope and payload schemas, error codes, window assignment | 1 | Built |
+| Kafka in Docker Compose (`make up`, `make topics`) | Local broker; topic declared explicitly, auto-create off | 2 | Built |
+| `broker/` producer, ingest API (`POST /events`) | Validate, produce with `acks=all`, answer after the broker acknowledged | 2 | Built |
+| `/health`, `/ready` | Liveness; readiness of the broker, the topic and the producer's poll thread | 2 | Built (database and migration checks in phase 3) |
+| PostgreSQL in Docker Compose | Local database | 3 | Not built |
 | `data/` models and migrations | `aggregates` and `processed_events` tables | 3 | Not built |
 | `services/` apply | Deduplicate and upsert the aggregate in one transaction | 3 | Not built |
 | `consumer/` | Poll loop, manual offset commit, shutdown | 3 | Not built |
